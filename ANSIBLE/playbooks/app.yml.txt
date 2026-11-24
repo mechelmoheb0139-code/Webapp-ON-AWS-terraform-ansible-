@@ -1,0 +1,281 @@
+---
+- name: Build and Deploy VProfile Application
+  hosts: localhost
+  connection: local
+  become: yes
+
+  vars:
+    project_dir: /root/vprofile-project
+    tomcat_version: "9.0.124"
+    tomcat_home: /opt/tomcat9
+    tomcat_user: tomcat
+    tomcat_group: tomcat
+
+    db_host: "10.0.139.42"
+    db_name: accounts
+    db_user: admin
+    db_password: "admin123"
+
+    memcached_host: "10.0.131.220"
+
+    rabbitmq_host: "10.0.134.175"
+    rabbitmq_user: test
+    rabbitmq_password: test
+
+  tasks:
+
+    # Install required packages
+    - name: Update apt cache and install dependencies
+      ansible.builtin.apt:
+        update_cache: yes
+        name:
+          - openjdk-17-jdk
+          - maven
+          - git
+          - nginx
+          - curl
+          - tar
+        state: present
+
+    # Get VProfile source code
+    - name: Clone VProfile repository
+      ansible.builtin.git:
+        repo: https://github.com/hkhcoder/vprofile-project.git
+        dest: "{{ project_dir }}"
+        version: main
+        force: yes
+
+    # Configure application.properties BEFORE BUILD
+    - name: Configure Database URL
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^jdbc.url='
+        line: "jdbc.url=jdbc:mysql://{{ db_host }}:3306/{{ db_name }}?useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull"
+
+    - name: Configure Database username
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^jdbc.username='
+        line: "jdbc.username={{ db_user }}"
+
+    - name: Configure Database password
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^jdbc.password='
+        line: "jdbc.password={{ db_password }}"
+      no_log: true
+
+    - name: Configure Memcached host
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^memcached.active.host='
+        line: "memcached.active.host={{ memcached_host }}"
+
+    - name: Configure RabbitMQ host
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^rabbitmq.address='
+        line: "rabbitmq.address={{ rabbitmq_host }}"
+
+    - name: Configure RabbitMQ username
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^rabbitmq.username='
+        line: "rabbitmq.username={{ rabbitmq_user }}"
+
+    - name: Configure RabbitMQ password
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/src/main/resources/application.properties"
+        regexp: '^rabbitmq.password='
+        line: "rabbitmq.password={{ rabbitmq_password }}"
+      no_log: true
+
+    # Build application
+    - name: Build VProfile WAR using Maven
+      ansible.builtin.command:
+        cmd: mvn -B clean package -DskipTests
+        chdir: "{{ project_dir }}"
+
+    - name: Find generated WAR file
+      ansible.builtin.find:
+        paths: "{{ project_dir }}/target"
+        patterns: "*.war"
+        file_type: file
+      register: war_files
+
+    - name: Verify WAR file exists
+      ansible.builtin.assert:
+        that:
+          - war_files.matched > 0
+        fail_msg: "Maven did not generate a WAR file."
+
+    # Create Tomcat user
+    - name: Create Tomcat system group
+      ansible.builtin.group:
+        name: "{{ tomcat_group }}"
+        system: yes
+        state: present
+
+    - name: Create Tomcat system user
+      ansible.builtin.user:
+        name: "{{ tomcat_user }}"
+        group: "{{ tomcat_group }}"
+        home: "{{ tomcat_home }}"
+        shell: /usr/sbin/nologin
+        system: yes
+        create_home: no
+        state: present
+
+    # Install Tomcat 9
+    - name: Download Tomcat 9
+      ansible.builtin.get_url:
+        url: "https://dlcdn.apache.org/tomcat/tomcat-9/v{{ tomcat_version }}/bin/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        dest: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        mode: "0644"
+
+    - name: Extract Tomcat
+      ansible.builtin.unarchive:
+        src: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        dest: /opt
+        remote_src: yes
+        creates: "/opt/apache-tomcat-{{ tomcat_version }}"
+
+    - name: Create Tomcat symlink
+      ansible.builtin.file:
+        src: "/opt/apache-tomcat-{{ tomcat_version }}"
+        dest: "{{ tomcat_home }}"
+        state: link
+
+    - name: Set Tomcat ownership
+      ansible.builtin.file:
+        path: "/opt/apache-tomcat-{{ tomcat_version }}"
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_group }}"
+        recurse: yes
+
+    # Configure Tomcat systemd service
+    - name: Create Tomcat systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tomcat9.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Apache Tomcat 9
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=tomcat
+          Group=tomcat
+          Environment="JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
+          Environment="CATALINA_HOME=/opt/tomcat9"
+          Environment="CATALINA_BASE=/opt/tomcat9"
+          ExecStart=/opt/tomcat9/bin/catalina.sh run
+          ExecStop=/opt/tomcat9/bin/shutdown.sh
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart Tomcat
+
+    # Deploy application
+    - name: Stop Tomcat before deployment
+      ansible.builtin.systemd:
+        name: tomcat9
+        state: stopped
+        daemon_reload: yes
+
+    - name: Remove previous ROOT application
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ tomcat_home }}/webapps/ROOT"
+        - "{{ tomcat_home }}/webapps/ROOT.war"
+
+    - name: Deploy VProfile WAR
+      ansible.builtin.copy:
+        src: "{{ war_files.files[0].path }}"
+        dest: "{{ tomcat_home }}/webapps/ROOT.war"
+        remote_src: yes
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_group }}"
+        mode: "0644"
+
+    - name: Start and enable Tomcat
+      ansible.builtin.systemd:
+        name: tomcat9
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    # Configure Nginx
+    - name: Create Nginx reverse proxy configuration
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/vproapp
+        mode: "0644"
+        content: |
+          upstream vproapp {
+              server 127.0.0.1:8080;
+          }
+
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://vproapp;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Remove default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Enable VProfile Nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/vproapp
+        dest: /etc/nginx/sites-enabled/vproapp
+        state: link
+      notify: Restart Nginx
+
+    - name: Validate Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Start and enable Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Wait for Tomcat port
+      ansible.builtin.wait_for:
+        port: 8080
+        host: 127.0.0.1
+        timeout: 120
+
+    - name: Wait for Nginx port
+      ansible.builtin.wait_for:
+        port: 80
+        host: 127.0.0.1
+        timeout: 30
+
+  handlers:
+    - name: Restart Tomcat
+      ansible.builtin.systemd:
+        name: tomcat9
+        state: restarted
+        daemon_reload: yes
+
+    - name: Restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+

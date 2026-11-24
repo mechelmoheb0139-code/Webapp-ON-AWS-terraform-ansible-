@@ -1,0 +1,105 @@
+---
+- name: Configure RabbitMQ Server
+  hosts: message_broker
+  become: true
+
+  vars:
+    rabbitmq_user: test
+    rabbitmq_password: test
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required dependencies
+      ansible.builtin.apt:
+        name:
+          - curl
+          - gnupg
+          - socat
+          - logrotate
+        state: present
+
+    - name: Download RabbitMQ signing key
+      ansible.builtin.get_url:
+        url: https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA
+        dest: /tmp/rabbitmq-signing-key.asc
+        mode: '0644'
+
+    - name: Convert RabbitMQ signing key to keyring
+      ansible.builtin.command:
+        cmd: gpg --dearmor --yes -o /usr/share/keyrings/com.rabbitmq.team.gpg /tmp/rabbitmq-signing-key.asc
+        creates: /usr/share/keyrings/com.rabbitmq.team.gpg
+
+    - name: Set keyring permissions
+      ansible.builtin.file:
+        path: /usr/share/keyrings/com.rabbitmq.team.gpg
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Add RabbitMQ and Erlang repositories
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/rabbitmq.list
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+
+    - name: Update apt cache after adding repositories
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install Erlang packages and RabbitMQ
+      ansible.builtin.apt:
+        name:
+          - erlang-base
+          - erlang-asn1
+          - erlang-crypto
+          - erlang-eldap
+          - erlang-ftp
+          - erlang-inets
+          - erlang-mnesia
+          - erlang-os-mon
+          - erlang-parsetools
+          - erlang-public-key
+          - erlang-runtime-tools
+          - erlang-snmp
+          - erlang-ssl
+          - erlang-syntax-tools
+          - erlang-tftp
+          - erlang-tools
+          - erlang-xmerl
+          - rabbitmq-server
+        state: present
+
+    - name: Enable and start RabbitMQ
+      ansible.builtin.service:
+        name: rabbitmq-server
+        state: started
+        enabled: true
+
+    - name: Check existing RabbitMQ users
+      ansible.builtin.command:
+        cmd: rabbitmqctl list_users -q
+      register: rabbitmq_users
+      changed_when: false
+
+    - name: Create application RabbitMQ user
+      ansible.builtin.command:
+        cmd: rabbitmqctl add_user {{ rabbitmq_user }} {{ rabbitmq_password }}
+      when: rabbitmq_user not in rabbitmq_users.stdout
+
+    - name: Set RabbitMQ user administrator tag
+      ansible.builtin.command:
+        cmd: rabbitmqctl set_user_tags {{ rabbitmq_user }} administrator
+
+    - name: Set RabbitMQ user permissions
+      ansible.builtin.command:
+        cmd: rabbitmqctl set_permissions -p / {{ rabbitmq_user }} ".*" ".*" ".*"

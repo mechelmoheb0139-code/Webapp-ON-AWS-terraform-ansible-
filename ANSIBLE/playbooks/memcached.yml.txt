@@ -1,0 +1,48 @@
+---
+- name: Configure Memcached Server
+  hosts: cache
+  become: true
+
+  tasks:
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Memcached
+      ansible.builtin.apt:
+        name: memcached
+        state: present
+
+    - name: Configure Memcached listening address
+      ansible.builtin.replace:
+        path: /etc/memcached.conf
+        regexp: '^\s*-l\s+.*$'
+        replace: '-l 0.0.0.0'
+      notify: Restart Memcached
+
+    - name: Configure Memcached TCP port
+      ansible.builtin.lineinfile:
+        path: /etc/memcached.conf
+        regexp: '^-p\s+'
+        line: '-p 11211'
+      notify: Restart Memcached
+
+    - name: Configure Memcached UDP port
+      ansible.builtin.lineinfile:
+        path: /etc/memcached.conf
+        regexp: '^-U\s+'
+        line: '-U 11111'
+      notify: Restart Memcached
+
+    - name: Enable and start Memcached
+      ansible.builtin.service:
+        name: memcached
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart Memcached
+      ansible.builtin.service:
+        name: memcached
+        state: restarted

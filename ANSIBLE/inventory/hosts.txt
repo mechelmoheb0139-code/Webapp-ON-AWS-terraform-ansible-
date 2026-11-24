@@ -1,0 +1,13 @@
+[database]
+mariadb ansible_host=10.0.139.42
+
+[message_broker]
+rabbitmq ansible_host=10.0.134.175
+
+[cache]
+memcached ansible_host=10.0.131.220
+
+[backend:children]
+database
+message_broker
+cache
